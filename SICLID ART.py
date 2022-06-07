@@ -3,7 +3,10 @@ import siclidrobo
 
 def create():
     win = Toplevel(root)
-    
+    win.destroy()
+    win.update()
+    root.destroy()
+    root.update()
     siclidrobo.main()
 
 
