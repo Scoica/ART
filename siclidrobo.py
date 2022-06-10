@@ -3,6 +3,11 @@ from datetime import datetime, timedelta
 import subprocess
 import base64
 import sys
+import textwrap
+from ftplib import FTP
+import webbrowser
+import os
+from getpass import getpass
 
 
 ##############  GLOBALS ############################################################################
@@ -20,8 +25,11 @@ MAXCC04 = 'MAXCC=0004'
 CC00000 = '00000'
 ABEND = 'ABENDED'
 COMPLETED = 'FROM PDEU TO TDEB COMPLETED'
+COMPLETE  = 'FROM PDEU TO TDEC COMPLETED'
 Sub = 'SUBMITTED'
 End = 'ENDED'
+Auth = 'NOT AUTHORIZED'
+Omit = 'OMITTED OR IS NOT CORRECT'
 JobSub = None
 JobEnd = None
 runs   = None
@@ -76,12 +84,16 @@ def printCmd():
     global JobSub
     global JobEnd
     global Skip
-    TransferOk = None
-    ResponseOk = None
-    ResponseAB = None
-    JobOk      = None
-    Matched    = None
-    Skip       = None 
+    global WrongUser
+    global WrongPass
+    TransferOk  = None
+    ResponseOk  = None
+    ResponseAB  = None
+    JobOk       = None
+    Matched     = None
+    Skip        = None
+    WrongUser   = None
+    WrongPass   = None
     printLongLine()
     #The same thing as doCmd but only for printing
     cmd ="PrintText(string)"
@@ -94,32 +106,30 @@ def printCmd():
         data = subpro.stdout.readline().decode(encoding).rstrip('\n').rstrip('\r')
         print("Response from script: ", data)
     #When Jobs are submitted check for the response code
-        if MAXCC00 in data or MAXCC04 in data or MAXCC01 in data:
+        if (MAXCC00 in data or MAXCC04 in data) or MAXCC01 in data:
             JobOk = ResponseOk = 'OK'
         else:
             JobOk = 'KO' 
         if ABEND in data:
             ResponseAB = 'Y'
-        if COMPLETED in data:
+        if COMPLETED in data or COMPLETE in data:
             TransferOk = 'Y'
         if Sub in data:
-           if len(val_user) < 7: 
-              if data[29:32] == 'JOB':
-                 JobSub = data[29:37]
-              elif data[30:33] == 'JOB':
-                 JobSub = data[30:38]   
-              elif data[67:70] == 'JOB':
-                 JobSub = data[67:75]   
-           else:
-              if data[30:33] == 'JOB':
-                 JobSub = data[30:38]
-              elif data[67:70] == 'JOB':
-                 JobSub = data[67:75]
-        if End in data and JobSub == data[16:24]:
-            JobEnd  = data[16:24]
-            Matched = 'Y'
+           if data[29:32] == 'JOB':
+              JobSub = data[29:37]
+           elif data[30:33] == 'JOB':
+              JobSub = data[30:38]   
+           elif data[67:70] == 'JOB':
+              JobSub = data[67:75]      
+        if End in data and (JobSub == data[16:24] or JobSub == data[44:52]):
+           JobEnd  = data[16:24]
+           Matched = 'Y'
         if CC00000 in data:
-            Skip = 'Y'
+           Skip = 'Y'
+        if Auth in data:
+           WrongUser = 'Y'
+        if Omit in data:
+           WrongPass = 'Y' 
         if data == 'ok':
             break
 
@@ -142,7 +152,7 @@ def waitCmd():
 def checkResp(cmd):
     i = 1
     while i < 7:
-       cmd = "Wait(10,seconds)"
+       cmd = "Wait(5,seconds)"
        doCmd(cmd)
     # Display Job finished successfully or Abended  
        if ResponseOk == 'OK' and Matched == 'Y':
@@ -213,27 +223,10 @@ def runFdxdos():
 def respIs(response):
     global runs
     runs = response
-
-def retrieveTimebefore():
-    global t
-    global d
-    curDT = datetime.today() - timedelta(hours=1, minutes=0)
-    t = curDT.strftime('%H:%M:%S')
-    d = curDT.strftime('%Y-%m-%d')
     
-def retrieveTimeafter():
-    global t1
-    global d1
-    curDT = datetime.today() - timedelta(hours=1, minutes=0)
-    t1 = curDT.strftime('%H:%M:%S')
-    d1 = curDT.strftime('%Y-%m-%d')
-
 def runBaseline():
     i = 1
     while runs >= i:
-          #Recover the timestamp for French time to have it for UNDODB2 data
-          retrieveTimebefore()
-          
           # Set the CWA date used for Job run
           cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTDATE)\' ")'
           doCmd(cmd)
@@ -265,35 +258,6 @@ def runBaseline():
 
           cmd = 'Enter()'
           doCmd(cmd)
-          
-          # Take the timestamp after FDXDOS runs
-          retrieveTimeafter()
-
-          # Set the timestamp used for DB2#BASE run START
-          cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTT)\' ")' + 'String("\'")' + 'String("S")' + 'String("' + d + '")' + 'String("-")' + 'String("' + t + '")' + 'String("\'")'
-          doCmd(cmd)
-
-          cmd = 'Enter()'
-          doCmd(cmd)
-
-          #Wait for the response of the job RC = 00
-          checkResp(cmd)
-
-          cmd = 'Enter()'
-          doCmd(cmd)
-
-          # Set the timestamp used for DB2#BASE run END
-          cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTT)\' ")' + 'String("\'")' + 'String("E")' + 'String("' + d1 + '")' + 'String("-")' + 'String("' + t1 + '")' + 'String("\'")'
-          doCmd(cmd)
-
-          cmd = 'Enter()'
-          doCmd(cmd)
-
-          #Wait for the response of the job RC = 00
-          checkResp(cmd)
-
-          cmd = 'Enter()'
-          doCmd(cmd)
 
           # Submit DB2#BASE Job
           cmd = 'String("TSO SUBMIT (\'TDEBQSM.LIB.ART.JCL(DB2#BASE)\')")'
@@ -314,17 +278,13 @@ def runBaseline():
 def runRelease():
     # reimport the foyers and vendors
     importRelease()
-    i = 1
-    while runs >= i:
-          #Recover the timestamp for French time to have it for UNDODB2 data
-          retrieveTimebefore()
-          
+    i = 0
+    while runs > i:         
           # Set the CWA date used for Job run
           cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTDATE)\' ")'
           doCmd(cmd)
           
-          val_CWA = input("Please insert CWA date in format DD.MM.SSYY for the event run and press Enter to continue : ")
-          cmd = 'String("' + val_CWA + '")'
+          cmd = 'String("\'")' + 'String("' + ListCWA[i] + '")' + 'String("\'")'
           doCmd(cmd)
 
           cmd = 'Enter()'
@@ -339,35 +299,6 @@ def runRelease():
           cmd = 'String("TSO SUBMIT (\'TDEBQSM.LIB.ART.JCL(RELEASE#)\')")'
           doCmd(cmd)
     
-          cmd = 'Enter()'
-          doCmd(cmd)
-
-          #Wait for the response of the job RC = 00
-          checkResp(cmd)
-
-          cmd = 'Enter()'
-          doCmd(cmd)
-          
-          # Take the timestamp after FDXDOS runs
-          retrieveTimeafter()
-
-          # Set the timestamp used for DB2#REL run START
-          cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTT)\' ")' + 'String("\'")' +  'String("S")' +  'String("' + d + '")' + 'String("-")' + 'String("' + t + '")' + 'String("\'")'
-          doCmd(cmd)
-
-          cmd = 'Enter()'
-          doCmd(cmd)
-
-          #Wait for the response of the job RC = 00
-          checkResp(cmd)
-
-          cmd = 'Enter()'
-          doCmd(cmd)
-
-          # Set the timestamp used for DB2#BASE run END
-          cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTT)\' ")' + 'String("\'")' +  'String("E")' + 'String("' + d1 + '")' + 'String("-")' + 'String("' + t1 + '")' + 'String("\'")'
-          doCmd(cmd)
-
           cmd = 'Enter()'
           doCmd(cmd)
 
@@ -473,7 +404,7 @@ def importRelease():
 def compareFiles():
     for i in range(len(ListCWA)):
         # Set the CWA date used for Job run
-        cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTDATE)\' ")' + 'String("' + ListCWA[i] + '")'
+        cmd = 'String("TSO CALL \'TDEAAPP.CREDIT.LNKBA.TDEB(ARTDATE)\' ")' + 'String("\'")' + 'String("' + ListCWA[i] + '")' + 'String("\'")'
         doCmd(cmd)
 
         cmd = 'Enter()'
@@ -491,7 +422,68 @@ def compareFiles():
 
         cmd = 'Enter()'
         doCmd(cmd)
-        
+
+        global SiclidDate
+        SiclidDay = ListCWA[i][0:2]
+        SiclidMonth = ListCWA[i][3:5]
+        SiclidYear = ListCWA[i][8:10]
+        SiclidDate = SiclidYear + SiclidMonth + SiclidDay
+
+        exportFile()
+
+def exportFile():
+    sess = FTP("172.21.2.135", val_user, val_pass)
+
+    dir = r"C:\Users\Florin.bosoi\Desktop\Germany\3 python test automation"
+    hostfile = "TPRGPPL.REPORT.D" + SiclidDate + ".DB2.COMPARE"
+    writeFile = "ftpDownload.txt"
+
+    lines = []
+    sess.retrlines("RETR '"+ hostfile +"'", lines.append)
+    pcfile = open("%s/%s"% (dir,writeFile), 'w')
+
+    for line in lines:
+        pcfile.write(line+"\n")
+
+    pcfile.close()
+    sess.quit()
+
+    contents = open("%s/%s"% (dir,writeFile), "r")
+
+    with open("output.html", "w") as e:
+        for lines in contents.readlines():
+            e.write("<pre>" + lines + "</pre>")
+
+    with open("output.html", "r", encoding='utf-8') as f:
+        text= f.read()
+    
+    filename = "output.html"
+    webbrowser.open('file://' + os.path.realpath(filename))
+
+def checkCredentials():
+    # check if the userid or password have been inserted correctly only two times
+    for inserting in range(2):
+        if WrongUser == 'Y':
+           val_user = input('UserID was wrong, please insert again your User and press Enter to continue...')
+           cmd = 'String("' + val_user + '")'
+           doCmd(cmd)
+           cmd = 'Tab()'
+           doCmd(cmd)
+           val_pass = getpass("Please insert Password and press Enter to continue...")
+           cmd = 'String("' + val_pass + '")'
+           passCmd(cmd)
+           cmd = 'Enter()'
+           doCmd(cmd)
+        if WrongPass == 'Y':
+           val_pass = getpass('Password was wrong, please insert again your Password and press Enter to continue...')
+           cmd = 'String("' + val_pass + '")'
+           passCmd(cmd)
+           cmd = 'Enter()'
+           doCmd(cmd)
+    # if after two tries the user or password inserted will be still wrong end the script and ask the user to be sure of its credentials before trying again
+    if WrongUser == 'Y' or WrongPass == 'Y':
+       sys.exit("Your credentials have been inserted two times and were wrong, please wait a few minutes and make sure your credentials are correct before trying again.") 
+    
 def printLongLine():
     print('------------------------------------------------------------------------------')
  
@@ -528,14 +520,19 @@ def main():
 
     cmd = 'Tab()'
     doCmd(cmd)
-
-    val_pass = input("Please insert PASSWORD and press Enter to continue...")
+    
+    global val_pass
+    val_pass = getpass("Please insert Password and press Enter to continue, please note that the cursor will not move during writing...")
     cmd = 'String("' + val_pass + '")'
     passCmd(cmd)
 
     cmd = 'Enter()'
     doCmd(cmd)
 
+    #check for credentials
+
+    checkCredentials()
+    
     #Enter to PDF menu in mainframe
     cmd = 'Tab()'
     doCmd(cmd)
